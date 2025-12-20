@@ -12,6 +12,8 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
+pub mod commands;
+
 /// Enhanced REPL execution engine that integrates all RunMat components
 pub struct ReplEngine {
     /// JIT compiler engine (optional for fallback mode)
@@ -289,6 +291,7 @@ impl ReplEngine {
         let mut result_value: Option<Value> = None; // Always start fresh for each execution
         let mut suppressed_value: Option<Value> = None; // Track value for type info when suppressed
         let mut error = None;
+        let mut ans_update: Option<(usize, Value)> = None;
 
         // Check if this is an expression statement (ends with Pop)
         let is_expression_stmt = bytecode
@@ -516,6 +519,9 @@ impl ReplEngine {
                         let temp_var_id = execution_bytecode.var_count - 1; // The temp variable we added
                         if temp_var_id < self.variable_array.len() {
                             let expression_value = self.variable_array[temp_var_id].clone();
+                            // Capture for 'ans' update
+                            ans_update = Some((temp_var_id, expression_value.clone()));
+
                             if !is_semicolon_suppressed {
                                 result_value = Some(expression_value);
                                 if self.verbose {
@@ -621,6 +627,15 @@ impl ReplEngine {
                 }
             }
             self.function_definitions = updated_functions;
+
+            // Apply 'ans' update if applicable (persisting expression result)
+            if let Some((var_id, value)) = ans_update {
+                self.variable_names.insert("ans".to_string(), var_id);
+                self.workspace_values.insert("ans".to_string(), value);
+                if debug_trace {
+                    println!("Updated 'ans' to var_id {}", var_id);
+                }
+            }
         }
 
         if self.verbose {
