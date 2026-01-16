@@ -17,7 +17,7 @@ use crate::builtins::common::spec::{
 use crate::builtins::common::tensor;
 #[cfg(feature = "doc_export")]
 use crate::register_builtin_doc_text;
-use crate::{gather_if_needed, register_builtin_fusion_spec, register_builtin_gpu_spec};
+use crate::gather_if_needed;
 
 #[cfg(feature = "doc_export")]
 pub const DOC_MD: &str = r#"---
@@ -200,6 +200,7 @@ Prefer `writematrix` for new code. Use `dlmwrite` only when maintaining legacy s
 - Found a behavioural difference? [Open an issue](https://github.com/runmat-org/runmat/issues/new/choose) with details and a minimal repro.
 "#;
 
+#[runmat_macros::register_gpu_spec(builtin_path = "crate::builtins::io::tabular::dlmwrite")]
 pub const GPU_SPEC: BuiltinGpuSpec = BuiltinGpuSpec {
     name: "dlmwrite",
     op_kind: GpuOpKind::Custom("io-dlmwrite"),
@@ -215,8 +216,7 @@ pub const GPU_SPEC: BuiltinGpuSpec = BuiltinGpuSpec {
     notes: "Runs entirely on the host; gpuArray inputs are gathered before formatting.",
 };
 
-register_builtin_gpu_spec!(GPU_SPEC);
-
+#[runmat_macros::register_fusion_spec(builtin_path = "crate::builtins::io::tabular::dlmwrite")]
 pub const FUSION_SPEC: BuiltinFusionSpec = BuiltinFusionSpec {
     name: "dlmwrite",
     shape: ShapeRequirements::Any,
@@ -227,8 +227,6 @@ pub const FUSION_SPEC: BuiltinFusionSpec = BuiltinFusionSpec {
     notes: "Not eligible for fusion; performs synchronous file I/O.",
 };
 
-register_builtin_fusion_spec!(FUSION_SPEC);
-
 #[cfg(feature = "doc_export")]
 register_builtin_doc_text!("dlmwrite", DOC_MD);
 
@@ -237,7 +235,8 @@ register_builtin_doc_text!("dlmwrite", DOC_MD);
     category = "io/tabular",
     summary = "Write numeric matrices to delimiter-separated text files.",
     keywords = "dlmwrite,delimiter,precision,append,roffset,coffset",
-    accel = "cpu"
+    accel = "cpu",
+    builtin_path = "crate::builtins::io::tabular::dlmwrite"
 )]
 fn dlmwrite_builtin(filename: Value, data: Value, rest: Vec<Value>) -> Result<Value, String> {
     let gathered_path = gather_if_needed(&filename).map_err(|e| format!("dlmwrite: {e}"))?;
@@ -1535,6 +1534,238 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("dlmwrite"));
+    }
+
+    #[test]
+    fn dlmwrite_precision_format_with_flags() {
+        // Test that format flags like + and width are properly applied
+        let path = temp_path("txt");
+        let tensor = Tensor::new(vec![1.5, -2.5, 3.14159], vec![1, 3]).unwrap();
+        let filename = path.to_string_lossy().into_owned();
+        dlmwrite_builtin(
+            Value::from(filename),
+            Value::Tensor(tensor),
+            vec![
+                Value::from("precision"),
+                Value::from("%+.4f"),
+                Value::from("delimiter"),
+                Value::from(","),
+            ],
+        )
+        .unwrap();
+        let contents = fs::read_to_string(&path).unwrap();
+        let nl = platform_newline();
+        // With %+.4f, positive numbers should have + sign
+        assert_eq!(contents, format!("+1.5000,-2.5000,+3.1416{nl}"));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn dlmwrite_precision_format_with_width() {
+        // Test that width specifiers are properly applied
+        let path = temp_path("txt");
+        let tensor = Tensor::new(vec![1.5, 2.5], vec![1, 2]).unwrap();
+        let filename = path.to_string_lossy().into_owned();
+        dlmwrite_builtin(
+            Value::from(filename),
+            Value::Tensor(tensor),
+            vec![
+                Value::from("precision"),
+                Value::from("%10.3f"),
+                Value::from("delimiter"),
+                Value::from(","),
+            ],
+        )
+        .unwrap();
+        let contents = fs::read_to_string(&path).unwrap();
+        let nl = platform_newline();
+        // With %10.3f, numbers should be right-aligned with width 10
+        // Format: "     1.500,     2.500" (each number padded to 10 chars)
+        let expected = format!("     1.500,     2.500{nl}");
+        assert_eq!(contents, expected);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn dlmwrite_precision_format_left_align() {
+        // Test that '-' flag (left alignment) is properly applied
+        let path = temp_path("txt");
+        let tensor = Tensor::new(vec![1.5, 2.5], vec![1, 2]).unwrap();
+        let filename = path.to_string_lossy().into_owned();
+        dlmwrite_builtin(
+            Value::from(filename),
+            Value::Tensor(tensor),
+            vec![
+                Value::from("precision"),
+                Value::from("%-10.3f"),
+                Value::from("delimiter"),
+                Value::from(","),
+            ],
+        )
+        .unwrap();
+        let contents = fs::read_to_string(&path).unwrap();
+        let nl = platform_newline();
+        // With %-10.3f, numbers should be left-aligned with width 10
+        // Format: "1.500     ,2.500     " (each number padded to 10 chars, left-aligned)
+        let expected = format!("1.500     ,2.500     {nl}");
+        assert_eq!(contents, expected);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn dlmwrite_precision_format_space_sign() {
+        // Test that ' ' flag (space sign) is properly applied
+        let path = temp_path("txt");
+        let tensor = Tensor::new(vec![1.5, -2.5, 3.14159], vec![1, 3]).unwrap();
+        let filename = path.to_string_lossy().into_owned();
+        dlmwrite_builtin(
+            Value::from(filename),
+            Value::Tensor(tensor),
+            vec![
+                Value::from("precision"),
+                Value::from("% .4f"),
+                Value::from("delimiter"),
+                Value::from(","),
+            ],
+        )
+        .unwrap();
+        let contents = fs::read_to_string(&path).unwrap();
+        let nl = platform_newline();
+        // With % .4f, positive numbers should have space sign, negatives keep '-'
+        // Format: " 1.5000,-2.5000, 3.1416"
+        let expected = format!(" 1.5000,-2.5000, 3.1416{nl}");
+        assert_eq!(contents, expected);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn dlmwrite_precision_format_zero_pad() {
+        // Test that '0' flag (zero padding) is properly applied
+        let path = temp_path("txt");
+        let tensor = Tensor::new(vec![1.5, 2.5], vec![1, 2]).unwrap();
+        let filename = path.to_string_lossy().into_owned();
+        dlmwrite_builtin(
+            Value::from(filename),
+            Value::Tensor(tensor),
+            vec![
+                Value::from("precision"),
+                Value::from("%010.3f"),
+                Value::from("delimiter"),
+                Value::from(","),
+            ],
+        )
+        .unwrap();
+        let contents = fs::read_to_string(&path).unwrap();
+        let nl = platform_newline();
+        // With %010.3f, numbers should be zero-padded to width 10
+        // Format: "000001.500,000002.500" (each number padded to 10 chars with zeros)
+        let expected = format!("000001.500,000002.500{nl}");
+        assert_eq!(contents, expected);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn dlmwrite_precision_format_zero_pad_with_sign() {
+        // Test that '0' flag works correctly with '+' flag (zero padding with sign)
+        let path = temp_path("txt");
+        let tensor = Tensor::new(vec![1.5, -2.5], vec![1, 2]).unwrap();
+        let filename = path.to_string_lossy().into_owned();
+        dlmwrite_builtin(
+            Value::from(filename),
+            Value::Tensor(tensor),
+            vec![
+                Value::from("precision"),
+                Value::from("%+010.3f"),
+                Value::from("delimiter"),
+                Value::from(","),
+            ],
+        )
+        .unwrap();
+        let contents = fs::read_to_string(&path).unwrap();
+        let nl = platform_newline();
+        // With %+010.3f, numbers should be zero-padded with sign before zeros
+        // Format: "+00001.500,-00002.500" (sign comes first, then zeros)
+        let expected = format!("+00001.500,-00002.500{nl}");
+        assert_eq!(contents, expected);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn dlmwrite_precision_format_alternate_form_fixed() {
+        // Test that '#' flag (alternate form) forces decimal point in fixed format
+        let path = temp_path("txt");
+        let tensor = Tensor::new(vec![1.0, 2.5], vec![1, 2]).unwrap();
+        let filename = path.to_string_lossy().into_owned();
+        dlmwrite_builtin(
+            Value::from(filename),
+            Value::Tensor(tensor),
+            vec![
+                Value::from("precision"),
+                Value::from("%#.3f"),
+                Value::from("delimiter"),
+                Value::from(","),
+            ],
+        )
+        .unwrap();
+        let contents = fs::read_to_string(&path).unwrap();
+        let nl = platform_newline();
+        // With %#.3f, even whole numbers should include decimal point
+        // Format: "1.000,2.500"
+        let expected = format!("1.000,2.500{nl}");
+        assert_eq!(contents, expected);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn dlmwrite_precision_format_alternate_form_general() {
+        // Test that '#' flag (alternate form) keeps trailing zeros in general format
+        let path = temp_path("txt");
+        let tensor = Tensor::new(vec![1.0, 2.5], vec![1, 2]).unwrap();
+        let filename = path.to_string_lossy().into_owned();
+        dlmwrite_builtin(
+            Value::from(filename),
+            Value::Tensor(tensor),
+            vec![
+                Value::from("precision"),
+                Value::from("%#.3g"),
+                Value::from("delimiter"),
+                Value::from(","),
+            ],
+        )
+        .unwrap();
+        let contents = fs::read_to_string(&path).unwrap();
+        let nl = platform_newline();
+        // With %#.3g, trailing zeros should be kept
+        // Format: "1.00,2.50" (trailing zeros preserved)
+        let expected = format!("1.00,2.50{nl}");
+        assert_eq!(contents, expected);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn dlmwrite_precision_format_combined_flags() {
+        // Test that multiple flags can be combined
+        let path = temp_path("txt");
+        let tensor = Tensor::new(vec![1.5, -2.5], vec![1, 2]).unwrap();
+        let filename = path.to_string_lossy().into_owned();
+        dlmwrite_builtin(
+            Value::from(filename),
+            Value::Tensor(tensor),
+            vec![
+                Value::from("precision"),
+                Value::from("%+-10.3f"),
+                Value::from("delimiter"),
+                Value::from(","),
+            ],
+        )
+        .unwrap();
+        let contents = fs::read_to_string(&path).unwrap();
+        let nl = platform_newline();
+        // With %+-10.3f, numbers should be left-aligned with + sign for positives
+        // Format: "+1.500    ,-2.500    " (left-aligned, sign included)
+        let expected = format!("+1.500    ,-2.500    {nl}");
+        assert_eq!(contents, expected);
+        let _ = fs::remove_file(path);
     }
 
     #[test]
